@@ -45,7 +45,7 @@ API Gateway closes WebSockets after [two hours](https://docs.aws.amazon.com/apig
 
 ## Deploy
 
-The deployment uses **us-east-1**. The **duet-bootstrap** CloudFormation stack is `CREATE_COMPLETE`. The Vercel project **duet** is connected to `imshah-id/duet`, with root directory **apps/web**, Node.js **24**, and production domain **duet-green.vercel.app**. Production promotion is gated by the GitHub **check** and **deploy-backend** jobs.
+The deployment uses **us-east-1**. The **duet-bootstrap** CloudFormation stack provisions deployment access and API identities. The Vercel project **duet** is connected to `imshah-id/duet`, with root directory **apps/web**, Node.js **24**, and production domain **duet-green.vercel.app**. Production promotion is gated by the GitHub **check** and **deploy-backend** jobs.
 
 1. An AWS administrator creates the **duet-bootstrap** CloudFormation stack from `infra/bootstrap.json`, acknowledging its named IAM resources. It creates the artifact bucket, HTTP/WebSocket API identities, Lambda runtime role, and GitHub deploy role. Set `AllowedOrigins` to the exact frontend origin. If the account already has the GitHub OIDC provider, supply its ARN as `ExistingGitHubOidcArn`.
 2. Set GitHub repository variables **AWS_DEPLOY_ROLE_ARN** to the bootstrap output `DeployRoleArn`, and **DUET_ALLOWED_ORIGINS** to `https://duet-green.vercel.app` (or an exact comma-separated origin list, without trailing slashes). Keep the bootstrap HTTP API's CORS origins and this variable aligned when adding domains.
@@ -61,9 +61,9 @@ The deployment uses **us-east-1**. The **duet-bootstrap** CloudFormation stack i
 
 For CLI deployments, `.vercelignore` permits only the frontend and npm workspace metadata. Run `vercel deploy --dry --json` to inspect the upload manifest before deploying.
 
-GitHub assumes the deploy role through OIDC, restricted to `imshah-id/duet` on `main`; no AWS access keys are stored in GitHub. Pull requests run checks without production deployment credentials. The deploy role can manage the Duet resources and pass only the Duet runtime role; it cannot create arbitrary IAM roles.
+GitHub assumes the deploy role through OIDC, restricted to `imshah-id/duet` on `main`, including its immutable owner and repository IDs; no AWS access keys are stored in GitHub. Pull requests run checks without production deployment credentials. The deploy role can manage the Duet resources and pass only the Duet runtime role; it cannot create arbitrary IAM roles.
 
-The backend stack provisions a 512 MB, 15-second Lambda using `provided.al2023`, an on-demand DynamoDB table, and API stages. HTTP throttling is 10 requests/second with a burst of 20; WebSocket throttling is 50 requests/second with a burst of 100. CloudWatch log retention is 14 days. The table and artifact bucket are retained when their stacks are removed; artifact objects expire after 30 days.
+The backend stack provisions a 512 MB, 15-second Lambda using `provided.al2023`, an on-demand DynamoDB table, and API stages. HTTP throttling is 10 requests/second with a burst of 20; WebSocket throttling is 50 requests/second with a burst of 100. CloudWatch log retention is 14 days. The table and artifact bucket are retained when their stacks are removed; a failed initial table creation is rolled back to avoid orphaning an unused table. Artifact objects expire after 30 days.
 
 Each connected viewer generates about 20 heartbeat Lambda invocations per minute, plus commands. Heartbeats also perform DynamoDB operations and WebSocket sends. Two viewers therefore produce about 40 heartbeat invocations per minute per room. API throttling is not a spending cap; monitor AWS usage and configure account budgets.
 
