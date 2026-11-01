@@ -1,0 +1,29 @@
+{
+  "name": "@duet/web",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.4.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "gsap": "3.15.0",
+    "@gsap/react": "2.1.2",
+    "lucide-react": "^0.577.0",
+    "zod": "^4.3.6",
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@fontsource/instrument-serif": "^5.2.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/youtube": "^0.1.2"
+  }
+}

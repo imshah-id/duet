@@ -1,0 +1,25 @@
+{
+  "name": "duet",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:server": "node --env-file-if-exists=.env scripts/cargo.mjs run",
+    "build": "npm run build -w apps/web",
+    "check": "npm run check -w apps/web",
+    "test": "node --import tsx --test apps/web/src/lib/*.test.ts",
+    "test:server": "node scripts/cargo.mjs test",
+    "test:integration": "node --import tsx --test tests/rooms.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

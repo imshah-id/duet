@@ -1,0 +1,33 @@
+name: Check
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: cargo +stable fmt --manifest-path server/Cargo.toml --check
+      - run: cargo +stable clippy --manifest-path server/Cargo.toml --locked -- -D warnings
+      - run: npm run check && npm test && npm run test:server && npm run build
+      - name: Test two connected viewers
+        run: |
+          cargo +stable build --manifest-path server/Cargo.toml --locked
+          server/target/debug/duet-server &
+          api_pid=$!
+          trap 'kill "$api_pid"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then break; fi
+            sleep 1
+          done
+          npm run test:integration

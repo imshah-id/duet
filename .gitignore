@@ -1,0 +1,25 @@
+node_modules/
+.next/
+target/
+.tools/
+.env
+.env.*
+!.env.example
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store
+
+# Local agent instructions, context, and generated reports
+*.md
+!README.md
+.agents/
+.codex/
+.claude/
+.cursor/
+context/
+contexts/
+design-system/
+graphify-out/
+*_CONTEXT.*
+*.log
