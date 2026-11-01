@@ -334,7 +334,9 @@
                     "apigateway:POST",
                     "apigateway:PUT",
                     "apigateway:PATCH",
-                    "apigateway:DELETE"
+                    "apigateway:DELETE",
+                    "apigateway:TagResource",
+                    "apigateway:UntagResource"
                   ],
                   "Resource": [
                     {
@@ -393,6 +395,16 @@
             }
           }
         ]
+      },
+      "Metadata": {
+        "cfn-lint": {
+          "config": {
+            "ignore_checks": [
+              "W3037"
+            ]
+          }
+        },
+        "Reason": "API Gateway V2 CreateStage explicitly requires TagResource on the stage collection; its named tagging actions are absent from the IAM action catalog."
       }
     },
     "HttpApi": {
