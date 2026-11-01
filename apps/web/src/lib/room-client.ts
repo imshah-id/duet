@@ -1,7 +1,14 @@
-import { Command, credentialsSchema, eventSchema, RoomEvent } from "./protocol";
+import {
+  Command,
+  credentialsSchema,
+  eventSchema,
+  RoomEvent,
+  type RoomState,
+} from "./protocol";
 
-export const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+export const apiUrl = (
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000"
+).replace(/\/$/, "");
 
 export async function createRoom() {
   const response = await fetch(`${apiUrl}/rooms`, {
@@ -26,6 +33,8 @@ export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
 export class RoomClient {
   private socket: WebSocket | null = null;
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
+  private latestState: RoomState | null = null;
   constructor(
     private readonly onEvent: (event: RoomEvent) => void,
     private readonly onStatus: (status: ConnectionStatus) => void,
@@ -34,17 +43,50 @@ export class RoomClient {
   connect(id: string, token: string, name: string) {
     this.disconnect();
     this.onStatus("connecting");
-    const url = new URL(`/rooms/${id}/ws`, apiUrl);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const gateway = process.env.NEXT_PUBLIC_WS_URL;
+    const url = new URL(gateway || `/rooms/${id}/ws`, apiUrl);
+    if (gateway) url.searchParams.set("room", id);
+    else url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    this.latestState = null;
     const socket = new WebSocket(url);
     this.socket = socket;
     socket.onopen = () =>
       socket.send(JSON.stringify({ type: "auth", token, name }));
     socket.onmessage = ({ data }) => {
-      if (typeof data !== "string" || data.length > 65_536) return;
+      if (
+        this.socket !== socket ||
+        typeof data !== "string" ||
+        data.length > 65_536
+      )
+        return;
       try {
-        const event = eventSchema.parse(JSON.parse(data));
-        if (event.type === "welcome") this.onStatus("connected");
+        let event = eventSchema.parse(JSON.parse(data));
+        if (event.type === "welcome" || event.type === "state") {
+          const { revision, snapshot_at } = event.state;
+          const previous = this.latestState;
+          if (
+            previous &&
+            (revision < previous.revision ||
+              (revision === previous.revision &&
+                (snapshot_at ?? 0) < (previous.snapshot_at ?? 0)))
+          ) {
+            if (event.type === "state") return;
+            event = { ...event, state: previous };
+          }
+          this.latestState = event.state;
+        }
+        if (event.type === "welcome") {
+          this.onStatus("connected");
+          if (gateway && !this.heartbeat) {
+            this.heartbeat = setInterval(() => {
+              if (
+                socket.readyState === WebSocket.OPEN &&
+                socket.bufferedAmount <= 65_536
+              )
+                socket.send(JSON.stringify({ type: "heartbeat" }));
+            }, 3_000);
+          }
+        }
         this.onEvent(event);
       } catch {
         this.onEvent({
@@ -53,7 +95,13 @@ export class RoomClient {
         });
       }
     };
-    socket.onclose = () => this.onStatus("disconnected");
+    socket.onclose = () => {
+      if (this.socket !== socket) return;
+      clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+      this.socket = null;
+      this.onStatus("disconnected");
+    };
     socket.onerror = () =>
       this.onEvent({
         type: "error",
@@ -73,6 +121,8 @@ export class RoomClient {
   }
 
   disconnect() {
+    clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
     if (!this.socket) return;
     const socket = this.socket;
     socket.onclose = null;

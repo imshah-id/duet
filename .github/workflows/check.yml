@@ -1,12 +1,23 @@
 name: Check
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -18,8 +29,13 @@ jobs:
       - run: npm ci
       - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - run: cargo +stable fmt --manifest-path server/Cargo.toml --check
-      - run: cargo +stable clippy --manifest-path server/Cargo.toml --locked -- -D warnings
+      - run: cargo +stable clippy --manifest-path server/Cargo.toml --locked --features lambda --all-targets -- -D warnings
       - run: npm run check && npm test && npm run test:server && npm run build
+      - run: cargo +stable test --manifest-path server/Cargo.toml --features lambda --locked
+      - name: Verify atomic room admission in DynamoDB
+        env:
+          DYNAMODB_LOCAL_ENDPOINT: http://127.0.0.1:8000
+        run: cargo +stable test --manifest-path server/Cargo.toml --features lambda --bin duet-lambda --locked -- --ignored
       - name: Test two connected viewers
         run: |
           cargo +stable build --manifest-path server/Cargo.toml --locked
@@ -31,3 +47,96 @@ jobs:
             sleep 1
           done
           npm run test:integration
+      - name: Validate AWS templates
+        run: |
+          python -m pip install 'cfn-lint==1.59.0'
+          cfn-lint infra/bootstrap.json infra/backend.json
+      - name: Build Lambda artifact
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools
+          rustup +stable target add x86_64-unknown-linux-musl
+          cargo +stable build --manifest-path server/Cargo.toml --release --locked --features lambda --bin duet-lambda --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          cp server/target/x86_64-unknown-linux-musl/release/duet-lambda dist/bootstrap
+          cd dist
+          zip bootstrap.zip bootstrap
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: duet-lambda
+          path: dist/bootstrap.zip
+          retention-days: 7
+
+  deploy-backend:
+    needs: check
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request' &&
+      vars.AWS_DEPLOY_ROLE_ARN != '' &&
+      vars.DUET_ALLOWED_ORIGINS != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: duet-production-backend
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: us-east-1
+      ALLOWED_ORIGINS: ${{ vars.DUET_ALLOWED_ORIGINS }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: duet-lambda
+          path: dist
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Deploy Lambda and APIs
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          bucket="duet-artifacts-${account}-${AWS_REGION}"
+          artifact="releases/${GITHUB_SHA}.zip"
+          aws s3 cp dist/bootstrap.zip "s3://${bucket}/${artifact}" --only-show-errors
+          aws cloudformation describe-stacks --stack-name duet-bootstrap \
+            --query 'Stacks[0]' --output json > /tmp/duet-bootstrap.json
+          bootstrap_origins=$(jq -r '.Parameters[] | select(.ParameterKey == "AllowedOrigins") | .ParameterValue' /tmp/duet-bootstrap.json)
+          if [ "$bootstrap_origins" != "$ALLOWED_ORIGINS" ]; then
+            echo 'DUET_ALLOWED_ORIGINS must match the bootstrap AllowedOrigins parameter.' >&2
+            exit 1
+          fi
+          http_api=$(jq -r '.Outputs[] | select(.OutputKey == "HttpApiId") | .OutputValue' /tmp/duet-bootstrap.json)
+          ws_api=$(jq -r '.Outputs[] | select(.OutputKey == "WebSocketApiId") | .OutputValue' /tmp/duet-bootstrap.json)
+          aws cloudformation deploy \
+            --stack-name duet-backend \
+            --template-file infra/backend.json \
+            --parameter-overrides \
+              "ArtifactBucket=${bucket}" \
+              "ArtifactKey=${artifact}" \
+              "RuntimeRoleArn=arn:aws:iam::${account}:role/duet-lambda-runtime" \
+              "AllowedOrigins=${ALLOWED_ORIGINS}" \
+              "HttpApi=${http_api}" \
+              "WebSocketApi=${ws_api}" \
+            --no-fail-on-empty-changeset
+          aws cloudformation describe-stacks --stack-name duet-backend \
+            --query 'Stacks[0].Outputs' --output json > /tmp/duet-outputs.json
+          api=$(jq -r '.[] | select(.OutputKey == "HttpApiUrl") | .OutputValue' /tmp/duet-outputs.json)
+          curl --fail --silent --show-error --retry 4 --retry-delay 3 "${api}/health"
+          ws=$(jq -r '.[] | select(.OutputKey == "WebSocketUrl") | .OutputValue' /tmp/duet-outputs.json)
+          echo "TEST_API_URL=${api}" >> "$GITHUB_ENV"
+          echo "TEST_WS_URL=${ws}" >> "$GITHUB_ENV"
+          echo "TEST_ORIGIN=${ALLOWED_ORIGINS%%,*}" >> "$GITHUB_ENV"
+          jq -r '.[] | "\(.OutputKey): \(.OutputValue)"' /tmp/duet-outputs.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify deployed two-viewer rooms
+        run: npm run test:integration

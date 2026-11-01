@@ -19,6 +19,7 @@ const stateSchema = z.object({
   playing: z.boolean(),
   position: z.number().nonnegative(),
   revision: z.number().int().nonnegative(),
+  snapshot_at: z.number().int().nonnegative().nullable().optional(),
   members: z
     .array(z.object({ role: roleSchema, name: z.string().max(128) }))
     .max(2),

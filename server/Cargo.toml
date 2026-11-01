@@ -3,8 +3,21 @@ name = "duet-server"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "duet-server"
+
+[features]
+lambda = ["dep:aws-config", "dep:aws-sdk-dynamodb", "dep:aws-sdk-apigatewaymanagement", "dep:lambda_runtime"]
+
+[[bin]]
+name = "duet-lambda"
+path = "src/bin/lambda.rs"
+required-features = ["lambda"]
 
 [dependencies]
+aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-dynamodb = { version = "1", optional = true }
+aws-sdk-apigatewaymanagement = { version = "1", optional = true }
+lambda_runtime = { version = "1", optional = true }
 axum = { version = "0.8.9", features = ["ws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }

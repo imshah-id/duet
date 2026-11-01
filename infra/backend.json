@@ -1,0 +1,320 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Duet Rust Lambda HTTP and WebSocket APIs with atomic DynamoDB room state.",
+  "Parameters": {
+    "ArtifactBucket": {
+      "Type": "String"
+    },
+    "ArtifactKey": {
+      "Type": "String"
+    },
+    "RuntimeRoleArn": {
+      "Type": "String"
+    },
+    "AllowedOrigins": {
+      "Type": "CommaDelimitedList",
+      "Description": "Exact HTTPS frontend origins. No trailing slash or wildcard."
+    },
+    "IceServersJson": {
+      "Type": "String",
+      "Default": "[{\"urls\":\"stun:stun.l.google.com:19302\"}]",
+      "NoEcho": true
+    },
+    "HttpApi": {
+      "Type": "String"
+    },
+    "WebSocketApi": {
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "Rooms": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "TableName": "duet-state",
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH"
+          }
+        ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "expires_at",
+          "Enabled": true
+        },
+        "SSESpecification": {
+          "SSEEnabled": true
+        }
+      }
+    },
+    "Logs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/duet-backend",
+        "RetentionInDays": 14
+      }
+    },
+    "Backend": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": [
+        "Logs"
+      ],
+      "Properties": {
+        "FunctionName": "duet-backend",
+        "Runtime": "provided.al2023",
+        "Handler": "bootstrap",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 15,
+        "Role": {
+          "Ref": "RuntimeRoleArn"
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "TABLE_NAME": {
+              "Ref": "Rooms"
+            },
+            "ALLOWED_ORIGINS": {
+              "Fn::Join": [
+                ",",
+                {
+                  "Ref": "AllowedOrigins"
+                }
+              ]
+            },
+            "WS_MANAGEMENT_ENDPOINT": {
+              "Fn::Sub": "https://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod"
+            },
+            "ICE_SERVERS_JSON": {
+              "Ref": "IceServersJson"
+            }
+          }
+        }
+      }
+    },
+    "HttpIntegration": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "Backend",
+            "Arn"
+          ]
+        },
+        "PayloadFormatVersion": "2.0",
+        "TimeoutInMillis": 15000
+      }
+    },
+    "WebSocketIntegration": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebSocketApi"
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationMethod": "POST",
+        "IntegrationUri": {
+          "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Backend.Arn}/invocations"
+        },
+        "TimeoutInMillis": 15000
+      }
+    },
+    "HttpPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "Backend"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+        }
+      }
+    },
+    "WebSocketPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "Backend"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
+        }
+      }
+    },
+    "HttpStage": {
+      "Type": "AWS::ApiGatewayV2::Stage",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "StageName": "$default",
+        "AutoDeploy": true,
+        "DefaultRouteSettings": {
+          "ThrottlingBurstLimit": 20,
+          "ThrottlingRateLimit": 10
+        }
+      }
+    },
+    "WebSocketStage": {
+      "Type": "AWS::ApiGatewayV2::Stage",
+      "DependsOn": [
+        "ConnectRoute",
+        "DisconnectRoute",
+        "DefaultRoute"
+      ],
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebSocketApi"
+        },
+        "StageName": "prod",
+        "AutoDeploy": true,
+        "DefaultRouteSettings": {
+          "ThrottlingBurstLimit": 100,
+          "ThrottlingRateLimit": 50
+        }
+      }
+    },
+    "HealthRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "RouteKey": "GET /health",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "HttpIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "CreateRoomRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi"
+        },
+        "RouteKey": "POST /rooms",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "HttpIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "ConnectRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebSocketApi"
+        },
+        "RouteKey": "$connect",
+        "AuthorizationType": "NONE",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "WebSocketIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "DisconnectRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebSocketApi"
+        },
+        "RouteKey": "$disconnect",
+        "AuthorizationType": "NONE",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "WebSocketIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "DefaultRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "WebSocketApi"
+        },
+        "RouteKey": "$default",
+        "AuthorizationType": "NONE",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "WebSocketIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "HttpApiUrl": {
+      "Value": {
+        "Fn::Sub": "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+      }
+    },
+    "WebSocketUrl": {
+      "Value": {
+        "Fn::Sub": "wss://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod"
+      }
+    }
+  }
+}

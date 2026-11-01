@@ -1,67 +1,81 @@
 # Duet
 
-A private watch room for two, built with Next.js, React, GSAP, and Rust/Axum.
-
-The visual theme pairs custom vector lilies with crimson (`#DC143C`), deep wine surfaces, ivory petals, and rose highlights. Artwork is local SVG, fonts are self-hosted, and GSAP entrance motion respects reduced-motion preferences.
+A private watch room for two. Next.js and React provide the interface; Rust coordinates playback, chat, and WebRTC signaling. The interface uses crimson accents, local lily artwork, self-hosted fonts, and reduced-motion-aware animation.
 
 ## Run locally
 
-Requires Node.js 22+ and stable Rust. A project-local Rust toolchain was installed in `.tools/` on the development machine; the scripts automatically use it when present. On another machine, install Rust through [rustup](https://rust-lang.org/tools/install/).
+Use Node.js 24 and stable Rust. The launcher uses a project-local `.tools/` Rust toolchain when present; otherwise it uses Rust from `PATH`.
 
 ```sh
 npm ci
 npm run dev
 ```
 
-Open **http://127.0.0.1:3000**. Create a room, copy the private invite, and open it in another browser tab or browser. Use the same hostname for both viewers. The API listens at `127.0.0.1:4000`.
+Open **http://127.0.0.1:3000**. The native Rust API listens at `127.0.0.1:4000`. Create a room and open its invite in another browser or tab. Both viewers must use the same frontend hostname.
 
-Optional settings: copy `.env.example` to `.env` for the API and `apps/web/.env.example` to `apps/web/.env.local` for the frontend. Root development commands load `.env`; Next.js loads its own environment file. Restart after changing settings. The public API URL must be set before a production frontend build.
+Optional configuration: copy `.env.example` to `.env` and `apps/web/.env.example` to `apps/web/.env.local`. Leave `NEXT_PUBLIC_WS_URL` unset for the native backend. Restart after changing settings.
 
-## What works
+## Playback
 
-| Source                                                  | Playback                                               | Audio                                                                                               |
-| ------------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| YouTube videos, Shorts, and video URLs for live streams | Official YouTube IFrame API; shared play, pause, seek  | Each viewer plays audio locally; each browser may need a click to allow playback                    |
-| Public HTTPS MP4/WebM links                             | Native HTML video; shared play, pause, seek            | Native audio, with independent volume controls                                                      |
-| Other sites / a browser tab / a screen                  | WebRTC screen video; host controls the captured source | Included **only if** the browser supplies an audio track; choose a tab and enable “Share tab audio” |
+| Source                                      | Playback                                          | Audio                                                                                      |
+| ------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| YouTube videos, Shorts, and live-video URLs | Official IFrame API; shared play, pause, and seek | Each browser plays its own audio                                                           |
+| Public HTTPS MP4/WebM links                 | Native video; shared play, pause, and seek        | Independent local volume                                                                   |
+| Other websites or a shared screen           | WebRTC capture; host controls the source          | Only when the browser supplies an audio track; select a tab and enable **Share tab audio** |
 
-No arbitrary website iframe or server-side URL fetching. DRM, embed restrictions, codec support, signed-link expiry, regional restrictions, provider ads, and browser capture restrictions still apply. YouTube live-stream synchronization is best effort; exact seekable windows differ. This is not a service for bypassing provider restrictions.
+The coordination backend never fetches, stores, or relays video. WebRTC media travels directly between browsers or through a configured TURN relay. Camera and microphone access are disabled. DRM, embedding restrictions, browser capture support, codecs, ads, and regional restrictions still apply.
 
-The interface reports missing screen audio, media errors, disconnected sessions, and blocked autoplay. A local preview of your own screen is muted to prevent an echo. Your partner gets the captured audio track when available. Microphone and camera access are disabled.
+Synchronization is approximate: clients correct drift over 1.25 seconds from periodic snapshots. YouTube live streams and buffering can diverge. **Hide chat**, **Focus view**, and **Hide controls** preserve the mounted player; Escape exits focus view.
 
-The room adapts to phones, tablets, and desktops. **Hide chat** collapses the companion panel; **Focus view** gives the player the viewport; **Hide controls** removes playback controls with a persistent restore button. Escape exits focus view. View changes preserve the mounted video and screen stream.
+## Backend runtimes
 
-## Structure and decisions
+|                  | Local/native            | AWS Lambda                                             |
+| ---------------- | ----------------------- | ------------------------------------------------------ |
+| Entry point      | `server/src/main.rs`    | `server/src/bin/lambda.rs`                             |
+| Connections      | Axum WebSockets         | API Gateway WebSocket API                              |
+| Room state       | Process memory          | DynamoDB, conditional writes and atomic seat admission |
+| Restart behavior | All rooms end           | Room state survives Lambda cold starts and deployments |
+| Timekeeping      | Monotonic process clock | Persisted epoch timestamps and playback anchors        |
 
-```text
-apps/web/src/app/          Routes, global styles, request security policy
-apps/web/src/components/   Landing artwork, watch room, native/YouTube players
-apps/web/src/lib/          Validated protocol, room client, WebRTC session
-server/src/room.rs         Room state and authorization rules
-server/src/main.rs         HTTP, WebSocket lifecycle, resource limits
-tests/rooms.test.ts        Two-client API integration test
-scripts/                  Local process and toolchain launchers
-```
+Lambda has a separate HTTP API for `POST /rooms` and `GET /health`. WebSockets connect with a nonsecret `?room=<uuid>` parameter; the token is sent in the first message. Authenticated clients send a heartbeat every three seconds to renew their seat and obtain playback snapshots. Snapshot revisions and timestamps prevent older deliveries from replacing newer state.
 
-`Room` owns server behavior through Rust methods. `RoomClient` and `ScreenSession` own browser connections and dispose of their sockets, timers, peers, and tracks. React owns presentation. There is no inheritance framework or dependency-injection container.
+Lambda room records expire after six hours, or after 30 minutes empty. Seats have 60-second leases; missed disconnects are reaped during the next room operation. Pending authentication expires after 15 seconds. Application code enforces these deadlines even before DynamoDB's asynchronous TTL deletion. Chat and WebRTC signals are forwarded without being stored as message history.
 
-The server coordinates playback; **it never relays or stores video bytes**. YouTube/direct video is fetched by each browser. Screen media travels over WebRTC, directly or through your configured TURN relay. Room state uses monotonic time; clients correct playback drift over 1.25 seconds from snapshots sent every three seconds. This is approximate synchronization, not frame lock, and buffering/ads can cause divergence.
+API Gateway closes WebSockets after [two hours](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-overview.html). Use **Reconnect** when disconnected; this is not an automatic reconnect loop. A silent unauthenticated socket can remain open until the gateway idle timeout, but cannot occupy a room seat or issue authenticated commands.
 
-The initial service is intentionally one process, with capped in-memory rooms. No database is needed for ephemeral rooms. Restarting the API ends every room. For multiple instances, route a room to its owner or introduce a shared room coordinator before scaling horizontally.
+## Deploy
 
-## Security and memory boundaries
+The intended region is **us-east-1**. The Vercel project is **duet**, with root directory **apps/web**, Node.js **24**, and assigned production domain **duet-green.vercel.app**. A successful public deployment has not yet been verified.
 
-- Random UUID room IDs and separate random host/guest capabilities. The server compares capabilities in constant time and authorizes every room operation.
-- Credentials are sent in the first WebSocket message, never query strings. Invites use URL fragments and are removed from the address bar after joining. Room capabilities are kept in tab-scoped session storage for reconnection, with a six-hour lifetime. XSS or a hostile extension can still read browser-held capabilities.
-- Exactly one host and one guest connection per room. An invite is a bearer credential: anyone possessing it can take the free guest seat. Identity verification, one-time redemption, host approval, and invite rotation are not implemented.
-- Exact CORS and WebSocket Origin allowlists; runtime JSON validation on both sides; host-only source selection and role-checked WebRTC signaling.
-- 256 rooms, 512 total WebSockets, 32 queued events per room, 24 KiB WebSocket messages, 40 messages/second per socket, 5-second authentication/write timeouts. Slow consumers disconnect. The UI retains at most 80 chat messages.
-- 5 room creations and 30 socket attempts per minute per direct peer IP; the IP map is capped at 4096 entries. Forwarded IP headers are intentionally not trusted. Behind a proxy, this limiter sees the proxy IP: configure edge limits and a trusted-proxy strategy before public rollout.
-- Rooms expire after 30 minutes empty or six hours total. Cleanup runs every 30 seconds; active sessions also check expiry. Disconnects pause playback.
-- Nonce-based script CSP, no inline script allowance in production, frame restrictions, no content sniffing, strict-origin referrers, no analytics or external fonts. The official YouTube API is loaded only when selected. It is third-party executable code; YouTube media requests and the configured STUN/TURN providers have their own privacy policies.
-- Chat/signaling are visible to the coordination server; they are not end-to-end encrypted at the application level. HTTPS/WSS encrypt transport in production. WebRTC media uses its browser transport encryption. Direct peer connections can reveal network addresses to the invited peer; relay-only mode is not implemented.
+1. An AWS administrator creates the **duet-bootstrap** CloudFormation stack from `infra/bootstrap.json`, acknowledging its named IAM resources. It creates the artifact bucket, HTTP/WebSocket API identities, Lambda runtime role, and GitHub deploy role. Set `AllowedOrigins` to the exact frontend origin. If the account already has the GitHub OIDC provider, supply its ARN as `ExistingGitHubOidcArn`.
+2. Set GitHub repository variables **AWS_DEPLOY_ROLE_ARN** to the bootstrap output `DeployRoleArn`, and **DUET_ALLOWED_ORIGINS** to `https://duet-green.vercel.app` (or an exact comma-separated origin list, without trailing slashes). Keep the bootstrap HTTP API's CORS origins and this variable aligned when adding domains.
+3. Push to `main` or run the **Check** workflow manually. After all checks pass, it builds an x86-64 musl Rust executable, packages it as `bootstrap.zip`, uploads a commit-addressed artifact, and deploys **duet-backend** from `infra/backend.json`. Deployment is skipped until both variables are configured. The workflow summary reports `HttpApiUrl` and `WebSocketUrl` and checks `/health` plus room admission, synchronization, chat, and signaling against the deployed APIs.
+4. Set these **Production** environment variables in Vercel before building, using the workflow's actual outputs:
 
-Direct media URLs are restricted to HTTPS MP4/WebM paths without embedded credentials or IP-literal/local hostnames. Browsers still contact that media host, so invite only someone you trust. This is not a DNS allowlist or a guarantee against tracking by media providers.
+   ```text
+   NEXT_PUBLIC_API_URL=https://<http-api-id>.execute-api.us-east-1.amazonaws.com
+   NEXT_PUBLIC_WS_URL=wss://<websocket-api-id>.execute-api.us-east-1.amazonaws.com/prod
+   ```
+
+5. Deploy `main` through the Vercel Git integration and test a two-browser room. These public URLs are embedded at build time; changing them requires a new frontend deployment. Vercel builds reject absent or invalid endpoints. Preview domains need their own explicit backend origin allowance.
+
+GitHub assumes the deploy role through OIDC, restricted to `imshah-id/duet` on `main`; no AWS access keys are stored in GitHub. Pull requests run checks without production deployment credentials. The deploy role can manage the Duet resources and pass only the Duet runtime role; it cannot create arbitrary IAM roles.
+
+The backend stack provisions a 512 MB, 15-second Lambda using `provided.al2023`, an on-demand DynamoDB table, and API stages. HTTP throttling is 10 requests/second with a burst of 20; WebSocket throttling is 50 requests/second with a burst of 100. CloudWatch log retention is 14 days. The table and artifact bucket are retained when their stacks are removed; artifact objects expire after 30 days.
+
+Each connected viewer generates about 20 heartbeat Lambda invocations per minute, plus commands. Heartbeats also perform DynamoDB operations and WebSocket sends. Two viewers therefore produce about 40 heartbeat invocations per minute per room. API throttling is not a spending cap; monitor AWS usage and configure account budgets.
+
+Configure TURN through the backend's `IceServersJson` CloudFormation parameter (`ICE_SERVERS_JSON` at runtime), then test across mobile data and restrictive networks. STUN alone does not guarantee connectivity. Static TURN credentials are suitable for initial testing; a public deployment needs short-lived credentials. Coordinate parameter changes with the deployment workflow so subsequent releases preserve the intended configuration.
+
+## Security and limits
+
+- One host and one guest per room, with separate random capabilities and role checks on every operation. Only the host can choose a source. Anyone holding an invite can claim the available guest seat; identity verification and invite rotation are not implemented.
+- Invite tokens use URL fragments, are removed from the address bar after entry, and remain in tab-scoped session storage for up to six hours. XSS or a hostile extension can still read them.
+- Exact Origin/CORS allowlists, nonce-based script CSP, typed protocol validation, 24 KiB incoming messages, and 40 messages/second per authenticated connection. The browser retains at most 80 chat messages.
+- Room creation is limited to five requests and connection attempts to 30 requests per IP per minute. Lambda uses API Gateway's client IP and DynamoDB counters. Native mode uses the direct socket peer; a reverse proxy requires a trusted-IP strategy and edge limits.
+- Native mode additionally caps rooms at 256, WebSockets at 512, the admission map at 4096 entries, and queued events at 32 per room; authentication and writes time out after five seconds. These process-memory caps do not apply to DynamoDB-backed Lambda rooms.
+- HTTPS/WSS protects production transport. Chat and signaling are visible to the coordination backend; they are not application-level end-to-end encrypted. WebRTC encrypts media transport, but direct peers may learn each other's network addresses.
+- Direct video URLs must be public HTTPS MP4/WebM paths without credentials or IP-literal/local hostnames. Browsers contact the media provider; this is not a DNS allowlist or protection against provider tracking. YouTube and STUN/TURN providers have their own privacy policies.
 
 ## Checks
 
@@ -70,27 +84,11 @@ npm run check
 npm test
 npm run test:server
 npm run build
-# With the API running:
+node scripts/cargo.mjs test --features lambda --locked
+# With the native API running:
 npm run test:integration
+# With DynamoDB Local running:
+DYNAMODB_LOCAL_ENDPOINT=http://127.0.0.1:8000 node scripts/cargo.mjs test --features lambda --bin duet-lambda --locked -- --ignored
 ```
 
-The tests cover viewing-mode transitions, screen audio/video track forwarding and cleanup, source/invite parsing, unsafe URLs, room admission, permission checks, invalid positions, expiration, disconnect cleanup, shared playback, chat, and WebRTC signal routing. They do not prove real-device audio/video quality or cross-network connectivity.
-
-## Before deployment
-
-Build the frontend with `npm run build`; start it with `npm run start -w apps/web`. Build the backend with `node scripts/cargo.mjs build --release --locked`; run `server/target/release/duet-server` with environment variables supplied by your service manager.
-
-Serve both services behind HTTPS/WSS with exact `ALLOWED_ORIGINS`, reverse-proxy connection/request limits, WebSocket forwarding, and a 60-second-or-longer WebSocket idle timeout. Do not expose development servers. Configure a TURN service through `ICE_SERVERS_JSON` and test across mobile data and restrictive networks; STUN alone cannot guarantee a connection. Use short-lived per-session TURN credentials in a public deployment—the current environment configuration is static and is intended for initial testing, not a public relay credential service.
-
-Verify two real devices for YouTube sound, MP4/WebM codecs, tab audio, blocked autoplay, denied capture, missing audio, remote mute, disconnect/reconnect, and source switching. No deployment, load benchmark, external security audit, or real-device audio test has been completed yet.
-
-## Verified references
-
-Framework package versions were checked against npm on November 2, 2026: Next.js 16.4.3, React 19.3.1, GSAP 3.15.0, and @gsap/react 2.1.2. Exact dependency resolutions are in `package-lock.json` and `server/Cargo.lock`.
-
-- [Next.js installation](https://nextjs.org/docs/app/getting-started/installation) and [nonce-based CSP](https://nextjs.org/docs/app/guides/content-security-policy)
-- [GSAP React lifecycle and cleanup](https://gsap.com/resources/React/)
-- [Axum WebSocket limits](https://docs.rs/axum/latest/axum/extract/struct.WebSocketUpgrade.html)
-- [YouTube IFrame API](https://developers.google.com/youtube/iframe_api_reference)
-- [Browser screen capture and audio constraints](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getDisplayMedia)
-- [OWASP WebSocket security guidance](https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html)
+Checks cover protocol validation, authorization, playback, chat, signaling, connection cleanup, persisted state, concurrent DynamoDB seat admission, and stale-connection isolation. Local tests do not establish deployed AWS behavior, real-device screen audio, cross-network media quality, load capacity, or a complete external security audit.

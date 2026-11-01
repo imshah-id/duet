@@ -5,7 +5,10 @@ export function proxy(request: NextRequest) {
   const api = new URL(
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000",
   );
-  const socket = `${api.protocol === "https:" ? "wss:" : "ws:"}//${api.host}`;
+  const socket = new URL(
+    process.env.NEXT_PUBLIC_WS_URL ||
+      `${api.protocol === "https:" ? "wss:" : "ws:"}//${api.host}`,
+  ).origin;
   const policy = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://www.youtube.com https://s.ytimg.com ${process.env.NODE_ENV === "development" ? "'unsafe-eval'" : ""}`,

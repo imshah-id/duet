@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub const ROOM_LIFETIME: Duration = Duration::from_secs(6 * 60 * 60);
 const IDLE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Host,
@@ -71,6 +71,8 @@ pub struct Member {
 
 #[derive(Clone, Serialize)]
 pub struct Snapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_at: Option<u64>,
     pub source: Option<Source>,
     pub playing: bool,
     pub position: f64,
@@ -210,6 +212,7 @@ impl Room {
 
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            snapshot_at: None,
             source: self.source.clone(),
             playing: self.playing,
             position: self.position

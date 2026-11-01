@@ -23,3 +23,5 @@ design-system/
 graphify-out/
 *_CONTEXT.*
 *.log
+.vercel/
+dist/

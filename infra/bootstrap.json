@@ -1,0 +1,439 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Duet deployment access: GitHub main branch OIDC, isolated artifact bucket, Lambda execution role.",
+  "Parameters": {
+    "ExistingGitHubOidcArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Existing token.actions.githubusercontent.com provider ARN, if this account already has one."
+    },
+    "AllowedOrigins": {
+      "Type": "CommaDelimitedList",
+      "Default": "https://duet-green.vercel.app",
+      "Description": "Exact HTTPS frontend origins."
+    }
+  },
+  "Conditions": {
+    "CreateOidc": {
+      "Fn::Equals": [
+        {
+          "Ref": "ExistingGitHubOidcArn"
+        },
+        ""
+      ]
+    }
+  },
+  "Resources": {
+    "GitHubOidc": {
+      "Type": "AWS::IAM::OIDCProvider",
+      "Condition": "CreateOidc",
+      "Properties": {
+        "Url": "https://token.actions.githubusercontent.com",
+        "ClientIdList": [
+          "sts.amazonaws.com"
+        ]
+      }
+    },
+    "Artifacts": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BucketName": {
+          "Fn::Sub": "duet-artifacts-${AWS::AccountId}-${AWS::Region}"
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "Id": "ExpireBuilds",
+              "Status": "Enabled",
+              "ExpirationInDays": 30
+            }
+          ]
+        }
+      }
+    },
+    "ArtifactPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "Artifacts"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${Artifacts.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RuntimeRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "duet-lambda-runtime",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "DuetRuntime",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/duet-state"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "execute-api:ManageConnections"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/*/@connections/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/duet-backend:*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DeployRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "duet-github-deploy",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Fn::If": [
+                    "CreateOidc",
+                    {
+                      "Ref": "GitHubOidc"
+                    },
+                    {
+                      "Ref": "ExistingGitHubOidcArn"
+                    }
+                  ]
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": "repo:imshah-id/duet:ref:refs/heads/main"
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "DeployDuet",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${Artifacts.Arn}/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "Artifacts",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:CreateChangeSet",
+                    "cloudformation:DescribeChangeSet",
+                    "cloudformation:ExecuteChangeSet",
+                    "cloudformation:DeleteChangeSet",
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:DescribeStackEvents",
+                    "cloudformation:GetTemplate",
+                    "cloudformation:GetTemplateSummary"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/duet-backend/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*/*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:ValidateTemplate"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "lambda:CreateFunction",
+                    "lambda:UpdateFunctionCode",
+                    "lambda:UpdateFunctionConfiguration",
+                    "lambda:GetFunction",
+                    "lambda:GetFunctionConfiguration",
+                    "lambda:DeleteFunction",
+                    "lambda:AddPermission",
+                    "lambda:RemovePermission",
+                    "lambda:GetPolicy",
+                    "lambda:TagResource",
+                    "lambda:UntagResource",
+                    "lambda:ListTags",
+                    "lambda:PutFunctionConcurrency",
+                    "lambda:DeleteFunctionConcurrency"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:duet-backend"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:PassRole"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "RuntimeRole",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": "lambda.amazonaws.com"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:CreateTable",
+                    "dynamodb:UpdateTable",
+                    "dynamodb:DescribeTable",
+                    "dynamodb:DeleteTable",
+                    "dynamodb:DescribeTimeToLive",
+                    "dynamodb:UpdateTimeToLive",
+                    "dynamodb:TagResource",
+                    "dynamodb:UntagResource",
+                    "dynamodb:ListTagsOfResource",
+                    "dynamodb:DescribeContinuousBackups",
+                    "dynamodb:UpdateContinuousBackups"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/duet-state"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:DeleteLogGroup",
+                    "logs:PutRetentionPolicy",
+                    "logs:DeleteRetentionPolicy",
+                    "logs:TagResource",
+                    "logs:UntagResource",
+                    "logs:ListTagsForResource",
+                    "logs:ListTagsLogGroup",
+                    "logs:TagLogGroup",
+                    "logs:UntagLogGroup"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/duet-backend*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "apigateway:GET",
+                    "apigateway:POST",
+                    "apigateway:PUT",
+                    "apigateway:PATCH",
+                    "apigateway:DELETE"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApi}"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApi}/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${WebSocketApi}"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${WebSocketApi}/*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:DescribeLogGroups"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:DescribeStacks"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/duet-bootstrap/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "HttpApi": {
+      "Type": "AWS::ApiGatewayV2::Api",
+      "Properties": {
+        "Name": "duet-http",
+        "ProtocolType": "HTTP",
+        "CorsConfiguration": {
+          "AllowOrigins": {
+            "Ref": "AllowedOrigins"
+          },
+          "AllowMethods": [
+            "GET",
+            "POST",
+            "OPTIONS"
+          ],
+          "AllowHeaders": [
+            "content-type"
+          ],
+          "MaxAge": 300
+        }
+      }
+    },
+    "WebSocketApi": {
+      "Type": "AWS::ApiGatewayV2::Api",
+      "Properties": {
+        "Name": "duet-websocket",
+        "ProtocolType": "WEBSOCKET",
+        "RouteSelectionExpression": "$request.body.type"
+      }
+    }
+  },
+  "Outputs": {
+    "DeployRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DeployRole",
+          "Arn"
+        ]
+      }
+    },
+    "RuntimeRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "RuntimeRole",
+          "Arn"
+        ]
+      }
+    },
+    "ArtifactBucket": {
+      "Value": {
+        "Ref": "Artifacts"
+      }
+    },
+    "HttpApiId": {
+      "Value": {
+        "Ref": "HttpApi"
+      }
+    },
+    "WebSocketApiId": {
+      "Value": {
+        "Ref": "WebSocketApi"
+      }
+    }
+  }
+}
