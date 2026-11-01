@@ -71,9 +71,7 @@ jobs:
     needs: check
     if: >-
       github.ref == 'refs/heads/main' &&
-      github.event_name != 'pull_request' &&
-      vars.AWS_DEPLOY_ROLE_ARN != '' &&
-      vars.DUET_ALLOWED_ORIGINS != ''
+      github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -85,7 +83,14 @@ jobs:
     env:
       AWS_REGION: us-east-1
       ALLOWED_ORIGINS: ${{ vars.DUET_ALLOWED_ORIGINS }}
+      DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
     steps:
+      - name: Require production deployment configuration
+        run: |
+          if [ -z "$DEPLOY_ROLE_ARN" ] || [ -z "$ALLOWED_ORIGINS" ]; then
+            echo 'Set AWS_DEPLOY_ROLE_ARN and DUET_ALLOWED_ORIGINS repository variables before deploying.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false

@@ -45,19 +45,21 @@ API Gateway closes WebSockets after [two hours](https://docs.aws.amazon.com/apig
 
 ## Deploy
 
-The intended region is **us-east-1**. The Vercel project is **duet**, with root directory **apps/web**, Node.js **24**, and assigned production domain **duet-green.vercel.app**. A successful public deployment has not yet been verified.
+The deployment uses **us-east-1**. The **duet-bootstrap** CloudFormation stack is `CREATE_COMPLETE`. The Vercel project **duet** is connected to `imshah-id/duet`, with root directory **apps/web**, Node.js **24**, and production domain **duet-green.vercel.app**. Production promotion is gated by the GitHub **check** and **deploy-backend** jobs.
 
 1. An AWS administrator creates the **duet-bootstrap** CloudFormation stack from `infra/bootstrap.json`, acknowledging its named IAM resources. It creates the artifact bucket, HTTP/WebSocket API identities, Lambda runtime role, and GitHub deploy role. Set `AllowedOrigins` to the exact frontend origin. If the account already has the GitHub OIDC provider, supply its ARN as `ExistingGitHubOidcArn`.
 2. Set GitHub repository variables **AWS_DEPLOY_ROLE_ARN** to the bootstrap output `DeployRoleArn`, and **DUET_ALLOWED_ORIGINS** to `https://duet-green.vercel.app` (or an exact comma-separated origin list, without trailing slashes). Keep the bootstrap HTTP API's CORS origins and this variable aligned when adding domains.
-3. Push to `main` or run the **Check** workflow manually. After all checks pass, it builds an x86-64 musl Rust executable, packages it as `bootstrap.zip`, uploads a commit-addressed artifact, and deploys **duet-backend** from `infra/backend.json`. Deployment is skipped until both variables are configured. The workflow summary reports `HttpApiUrl` and `WebSocketUrl` and checks `/health` plus room admission, synchronization, chat, and signaling against the deployed APIs.
-4. Set these **Production** environment variables in Vercel before building, using the workflow's actual outputs:
+3. Push to `main` or run the **Check** workflow manually. After all checks pass, it builds an x86-64 musl Rust executable, packages it as `bootstrap.zip`, uploads a commit-addressed artifact, and deploys **duet-backend** from `infra/backend.json`. Deployment requires both variables; missing configuration fails the production job. The workflow summary reports `HttpApiUrl` and `WebSocketUrl` and checks `/health` plus room admission, synchronization, chat, and signaling against the deployed APIs.
+4. These **Production** environment variables are configured in Vercel. For a replacement backend, update them using the workflow's outputs before building:
 
    ```text
-   NEXT_PUBLIC_API_URL=https://<http-api-id>.execute-api.us-east-1.amazonaws.com
-   NEXT_PUBLIC_WS_URL=wss://<websocket-api-id>.execute-api.us-east-1.amazonaws.com/prod
+   NEXT_PUBLIC_API_URL=https://5nygeot0hb.execute-api.us-east-1.amazonaws.com
+   NEXT_PUBLIC_WS_URL=wss://rbufml5rzj.execute-api.us-east-1.amazonaws.com/prod
    ```
 
-5. Deploy `main` through the Vercel Git integration and test a two-browser room. These public URLs are embedded at build time; changing them requires a new frontend deployment. Vercel builds reject absent or invalid endpoints. Preview domains need their own explicit backend origin allowance.
+5. Push `main` to trigger the Vercel Git integration. GitHub Deployment Checks hold the production alias until **check** and **deploy-backend** pass. Test a two-browser room after promotion. These public URLs are embedded at build time; changing them requires a new frontend deployment. Vercel builds reject absent or invalid endpoints. Preview domains need their own explicit backend origin allowance.
+
+For CLI deployments, `.vercelignore` permits only the frontend and npm workspace metadata. Run `vercel deploy --dry --json` to inspect the upload manifest before deploying.
 
 GitHub assumes the deploy role through OIDC, restricted to `imshah-id/duet` on `main`; no AWS access keys are stored in GitHub. Pull requests run checks without production deployment credentials. The deploy role can manage the Duet resources and pass only the Duet runtime role; it cannot create arbitrary IAM roles.
 

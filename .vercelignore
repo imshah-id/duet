@@ -1,0 +1,23 @@
+# Upload only the frontend and npm workspace metadata.
+**
+!package.json
+!package-lock.json
+!apps
+!apps/web
+!apps/web/package.json
+!apps/web/next.config.ts
+!apps/web/next-env.d.ts
+!apps/web/tsconfig.json
+!apps/web/src
+!apps/web/src/**
+!apps/web/public
+!apps/web/public/**
+
+# Keep local context, secrets, and test inputs out of allowed source folders.
+**/.*
+**/*.md
+**/*.test.ts
+**/*.tsbuildinfo
+**/*_CONTEXT.*
+**/context/**
+**/contexts/**
